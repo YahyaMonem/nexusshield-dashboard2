@@ -1,105 +1,156 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { supabase } from '../supabaseClient'
 import { enrichWithSeverity, MOTION_SEVERITY_META } from '../motionSeverity'
 import {
-    LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
+    AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell,
     XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
 } from 'recharts'
 import { format, subDays, eachDayOfInterval } from 'date-fns'
 
-const CHART_COLORS = ['#00e5ff', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6']
+const CHART_COLORS = ['#7f56d9', '#17b26a', '#f79009', '#f04438', '#2e90fa']
 const DAYS_OPTIONS = [7, 14, 30]
+const CHART_FONT = 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+const AXIS_TICK = { fontSize: 12, fontFamily: CHART_FONT, fill: '#667085' }
+const LEGEND_STYLE = { fontSize: 12, fontFamily: CHART_FONT, color: 'var(--text-secondary)' }
 
-const tooltipStyle = {
-    contentStyle: {
-        background: 'var(--bg-elevated)',
-        border: '1px solid var(--border-accent)',
-        borderRadius: 8,
-        fontFamily: 'var(--font-mono)',
-        fontSize: 11,
-        color: 'var(--text-primary)',
-    },
-    itemStyle: { color: 'var(--text-secondary)' },
-    labelStyle: { color: 'var(--text-primary)', fontWeight: 600 },
+function formatEventName(name = '') {
+    return String(name)
+        .replaceAll('_', ' ')
+        .split(' ')
+        .filter(Boolean)
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(' ')
+}
+
+function ChartTooltip({ active, payload, label }) {
+    if (!active || !payload?.length) return null
+
+    const visiblePayload = payload.filter(item => Number(item.value) > 0)
+    const rows = visiblePayload.length > 0 ? visiblePayload : payload
+
+    return (
+        <div className="chart-tooltip">
+            {label && <div className="chart-tooltip-label">{label}</div>}
+            {rows.map(item => {
+                const muted = Number(item.value) === 0
+                return (
+                    <div key={item.dataKey || item.name} className={`chart-tooltip-row${muted ? ' muted' : ''}`}>
+                        <span className="chart-tooltip-dot" style={{ background: item.color }} />
+                        <span>{formatEventName(item.name || item.dataKey)}</span>
+                        <strong>{item.value}</strong>
+                    </div>
+                )
+            })}
+        </div>
+    )
 }
 
 export default function AnalyticsPage() {
     const [days, setDays] = useState(7)
     const [loading, setLoading] = useState(true)
 
-    const [lineData, setLineData] = useState([])
-    const [donutData, setDonutData] = useState([])
-    const [peakData, setPeakData] = useState([])
-    const [heatmapData, setHeatmap] = useState([])
-    const [uptimeData, setUptime] = useState([])
-    const [severityData, setSeverityData] = useState({ high: 0, medium: 0, low: 0, total: 0 })
-    const [severityLineData, setSeverityLineData] = useState([])
+    const [events, setEvents] = useState([])
+    const [devices, setDevices] = useState([])
 
-    useEffect(() => { fetchAll() }, [days])
+    useEffect(() => {
+        let isMounted = true
 
-    async function fetchAll() {
-        setLoading(true)
-        const from = subDays(new Date(), days).toISOString()
+        async function fetchAll() {
+            setLoading(true)
+            const from = subDays(new Date(), days).toISOString()
 
-        const [eventsRes, devicesRes] = await Promise.all([
-            supabase.from('events').select('event_type, severity, created_at, device_id').gte('created_at', from),
-            supabase.from('devices').select('id, name'),
-        ])
+            const [eventsRes, trackingRes, devicesRes] = await Promise.all([
+                supabase.from('events').select('id, event_type, severity, created_at, device_id').gte('created_at', from),
+                supabase.from('tracking_events').select('object_class, created_at, device_id').gte('created_at', from),
+                supabase.from('devices').select('id, name'),
+            ])
 
-        const events = eventsRes.data || []
-        const devices = devicesRes.data || []
+            const fetchedEvents = eventsRes.data || []
+            const aiEvents = trackingRes.data || []
+            const fetchedDevices = devicesRes.data || []
 
-        // Enrich motion events with computed severity
-        const enriched = enrichWithSeverity(events)
+            // Enrich motion events with computed severity
+            const enrichedSensorEvents = enrichWithSeverity(fetchedEvents)
+            
+            // Map AI events to standard format
+            const mappedAiEvents = aiEvents.map(te => ({
+                event_type: te.object_class,
+                _severity: te.object_class === 'person' ? 'high' : 'medium',
+                created_at: te.created_at,
+                device_id: te.device_id
+            }))
+
+            // Combine both data streams
+            const enriched = [...enrichedSensorEvents, ...mappedAiEvents]
+
+            if (!isMounted) return
+            setEvents(enriched)
+            setDevices(fetchedDevices)
+            setLoading(false)
+        }
+        fetchAll()
+
+        return () => { isMounted = false }
+    }, [days])
+
+    const {
+        lineData,
+        donutData,
+        peakData,
+        heatmapData,
+        uptimeData,
+        severityData,
+        severityLineData
+    } = useMemo(() => {
+        const dayRange = eachDayOfInterval({ start: subDays(new Date(), days - 1), end: new Date() })
 
         // ── 1. Events over time (line chart) ──────────────────────────────────
-        const dayRange = eachDayOfInterval({ start: subDays(new Date(), days - 1), end: new Date() })
         const byDay = {}
         dayRange.forEach(d => { byDay[format(d, 'MMM d')] = 0 })
-        enriched.forEach(ev => {
+        events.forEach(ev => {
             const key = format(new Date(ev.created_at), 'MMM d')
             if (byDay[key] !== undefined) byDay[key]++
         })
-        setLineData(Object.entries(byDay).map(([date, count]) => ({ date, count })))
+        const lineData = Object.entries(byDay).map(([date, count]) => ({ date, count }))
 
         // ── 2. Event type breakdown (donut) ────────────────────────────────────
         const typeCounts = {}
-        enriched.forEach(ev => { typeCounts[ev.event_type] = (typeCounts[ev.event_type] || 0) + 1 })
-        setDonutData(Object.entries(typeCounts).map(([name, value]) => ({
-            name: name.replace('_', ' '),
+        events.forEach(ev => { typeCounts[ev.event_type] = (typeCounts[ev.event_type] || 0) + 1 })
+        const donutData = Object.entries(typeCounts).map(([name, value]) => ({
+            name: formatEventName(name),
             value,
-        })))
+        }))
 
         // ── 3. Peak hours (bar chart, 0-23) ───────────────────────────────────
         const hourCounts = Array(24).fill(0)
-        enriched.forEach(ev => { hourCounts[new Date(ev.created_at).getHours()]++ })
-        setPeakData(hourCounts.map((count, hour) => ({
+        events.forEach(ev => { hourCounts[new Date(ev.created_at).getHours()]++ })
+        const peakData = hourCounts.map((count, hour) => ({
             hour: `${String(hour).padStart(2, '0')}:00`,
             count,
-        })))
+        }))
 
         // ── 4. Heatmap: day-of-week × hour ────────────────────────────────────
         const DAYS_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
         const grid = Array(7).fill(null).map(() => Array(24).fill(0))
-        enriched.forEach(ev => {
+        events.forEach(ev => {
             const d = new Date(ev.created_at)
             grid[d.getDay()][d.getHours()]++
         })
-        setHeatmap(grid.map((hours, di) => ({ day: DAYS_LABELS[di], hours })))
+        const heatmapData = grid.map((hours, di) => ({ day: DAYS_LABELS[di], hours }))
 
         // ── 5. Device uptime (from events / heartbeats count) ─────────────────
         const devEventCounts = {}
         devices.forEach(d => { devEventCounts[d.id] = { name: d.name, events: 0 } })
-        enriched.forEach(ev => {
+        events.forEach(ev => {
             if (devEventCounts[ev.device_id]) devEventCounts[ev.device_id].events++
         })
-        setUptime(Object.values(devEventCounts).map(d => ({ name: d.name, events: d.events })))
+        const uptimeData = Object.values(devEventCounts).map(d => ({ name: d.name, events: d.events }))
 
         // ── 6. Security event severity breakdown (all classifiable events) ────────
-        const securityEvents = enriched.filter(ev => ev._severity !== null)
+        const securityEvents = events.filter(ev => ev._severity !== null)
         const sevCounts = { high: 0, medium: 0, low: 0 }
         securityEvents.forEach(ev => { sevCounts[ev._severity]++ })
-        setSeverityData({ ...sevCounts, total: securityEvents.length })
+        const severityData = { ...sevCounts, total: securityEvents.length }
 
         // Per-day severity stacked line
         const byDaySev = {}
@@ -108,10 +159,18 @@ export default function AnalyticsPage() {
             const key = format(new Date(ev.created_at), 'MMM d')
             if (byDaySev[key]) byDaySev[key][ev._severity]++
         })
-        setSeverityLineData(Object.values(byDaySev))
+        const severityLineData = Object.values(byDaySev)
 
-        setLoading(false)
-    }
+        return {
+            lineData,
+            donutData,
+            peakData,
+            heatmapData,
+            uptimeData,
+            severityData,
+            severityLineData
+        }
+    }, [events, devices, days])
 
     if (loading) return <div className="empty-state"><div className="spinner" /></div>
 
@@ -128,11 +187,11 @@ export default function AnalyticsPage() {
                         onClick={() => setDays(d)}
                         className="btn"
                         style={{
-                            padding: '5px 14px', fontSize: 11,
-                            background: days === d ? 'var(--accent-dim)' : 'transparent',
-                            border: `1px solid ${days === d ? 'rgba(0,229,255,0.3)' : 'var(--border-accent)'}`,
-                            color: days === d ? 'var(--accent)' : 'var(--text-secondary)',
-                            fontFamily: 'var(--font-mono)',
+                            padding: '5px 14px', fontSize: 13,
+                            background: days === d ? 'var(--brand-50)' : 'transparent',
+                            border: `1px solid ${days === d ? 'var(--brand-600)' : 'var(--border-secondary)'}`,
+                            color: days === d ? 'var(--brand-600)' : 'var(--text-tertiary)',
+                            fontWeight: days === d ? 600 : 500,
                         }}
                     >
                         {d}D
@@ -148,13 +207,19 @@ export default function AnalyticsPage() {
                         <span className="card-title">Events Over Time</span>
                     </div>
                     <ResponsiveContainer width="100%" height={200}>
-                        <LineChart data={lineData}>
-                            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                            <XAxis dataKey="date" tick={{ fontSize: 10, fontFamily: 'var(--font-mono)', fill: 'var(--text-muted)' }} />
-                            <YAxis tick={{ fontSize: 10, fontFamily: 'var(--font-mono)', fill: 'var(--text-muted)' }} />
-                            <Tooltip {...tooltipStyle} />
-                            <Line type="monotone" dataKey="count" stroke="var(--accent)" strokeWidth={2} dot={false} />
-                        </LineChart>
+                        <AreaChart data={lineData}>
+                            <defs>
+                                <linearGradient id="eventsGradient" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="5%" stopColor="#7f56d9" stopOpacity={0.28} />
+                                    <stop offset="95%" stopColor="#7f56d9" stopOpacity={0.02} />
+                                </linearGradient>
+                            </defs>
+                            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                            <XAxis dataKey="date" tick={AXIS_TICK} axisLine={false} tickLine={false} />
+                            <YAxis tick={AXIS_TICK} axisLine={false} tickLine={false} allowDecimals={false} />
+                            <Tooltip content={<ChartTooltip />} isAnimationActive={false} />
+                            <Area type="monotone" dataKey="count" name="Events" stroke="#7f56d9" fill="url(#eventsGradient)" strokeWidth={2.5} dot={false} activeDot={{ r: 4 }} />
+                        </AreaChart>
                     </ResponsiveContainer>
                 </div>
 
@@ -171,11 +236,11 @@ export default function AnalyticsPage() {
                                     <Pie data={donutData} cx="50%" cy="50%" innerRadius={55} outerRadius={80} dataKey="value" paddingAngle={3}>
                                         {donutData.map((_, i) => <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
                                     </Pie>
-                                    <Tooltip {...tooltipStyle} />
+                                    <Tooltip content={<ChartTooltip />} isAnimationActive={false} />
                                     <Legend
                                         iconType="circle"
                                         iconSize={8}
-                                        wrapperStyle={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}
+                                        wrapperStyle={LEGEND_STYLE}
                                     />
                                 </PieChart>
                             </ResponsiveContainer>
@@ -190,12 +255,12 @@ export default function AnalyticsPage() {
                     <span className="card-title">Peak Activity Hours</span>
                 </div>
                 <ResponsiveContainer width="100%" height={180}>
-                    <BarChart data={peakData} barSize={14}>
+                    <BarChart data={peakData} barSize={22} maxBarSize={28}>
                         <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                        <XAxis dataKey="hour" tick={{ fontSize: 9, fontFamily: 'var(--font-mono)', fill: 'var(--text-muted)' }} interval={1} />
-                        <YAxis tick={{ fontSize: 10, fontFamily: 'var(--font-mono)', fill: 'var(--text-muted)' }} />
-                        <Tooltip {...tooltipStyle} />
-                        <Bar dataKey="count" fill="var(--accent)" radius={[3, 3, 0, 0]} fillOpacity={0.85} />
+                        <XAxis dataKey="hour" tick={AXIS_TICK} interval={1} axisLine={false} tickLine={false} />
+                        <YAxis tick={AXIS_TICK} axisLine={false} tickLine={false} allowDecimals={false} />
+                        <Tooltip content={<ChartTooltip />} isAnimationActive={false} />
+                        <Bar dataKey="count" name="Events" fill="#7f56d9" radius={[4, 4, 0, 0]} fillOpacity={0.88} />
                     </BarChart>
                 </ResponsiveContainer>
             </div>
@@ -211,8 +276,8 @@ export default function AnalyticsPage() {
                         {Array(24).fill(0).map((_, h) => (
                             <div key={h} style={{
                                 width: 22, textAlign: 'center',
-                                fontSize: 8, fontFamily: 'var(--font-mono)',
-                                color: 'var(--text-muted)',
+                                fontSize: 10, fontWeight: 600,
+                                color: 'var(--text-quaternary)',
                             }}>
                                 {h % 4 === 0 ? String(h).padStart(2, '0') : ''}
                             </div>
@@ -221,8 +286,8 @@ export default function AnalyticsPage() {
                     {heatmapData.map(({ day, hours }) => (
                         <div key={day} style={{ display: 'flex', gap: 4, alignItems: 'center', marginBottom: 4 }}>
                             <div style={{
-                                width: 32, fontSize: 9, fontFamily: 'var(--font-mono)',
-                                color: 'var(--text-secondary)', textAlign: 'right', paddingRight: 6,
+                                width: 32, fontSize: 11, fontWeight: 600,
+                                color: 'var(--text-tertiary)', textAlign: 'right', paddingRight: 6,
                             }}>
                                 {day}
                             </div>
@@ -236,8 +301,8 @@ export default function AnalyticsPage() {
                                             width: 22, height: 16,
                                             borderRadius: 3,
                                             background: count === 0
-                                                ? 'var(--bg-hover)'
-                                                : `rgba(0,229,255,${0.1 + intensity * 0.9})`,
+                                                ? '#eef2f6'
+                                                : `rgba(127, 86, 217, ${0.14 + intensity * 0.78})`,
                                             border: '1px solid var(--border)',
                                             cursor: 'default',
                                         }}
@@ -258,12 +323,12 @@ export default function AnalyticsPage() {
                     ? <div className="empty-state">No devices</div>
                     : (
                         <ResponsiveContainer width="100%" height={160}>
-                            <BarChart data={uptimeData} layout="vertical" barSize={18}>
+                            <BarChart data={uptimeData} layout="vertical" barSize={18} maxBarSize={34}>
                                 <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" horizontal={false} />
-                                <XAxis type="number" tick={{ fontSize: 10, fontFamily: 'var(--font-mono)', fill: 'var(--text-muted)' }} />
-                                <YAxis type="category" dataKey="name" tick={{ fontSize: 11, fontFamily: 'var(--font-mono)', fill: 'var(--text-secondary)' }} width={120} />
-                                <Tooltip {...tooltipStyle} />
-                                <Bar dataKey="events" fill="var(--green)" radius={[0, 3, 3, 0]} />
+                                <XAxis type="number" tick={AXIS_TICK} axisLine={false} tickLine={false} allowDecimals={false} />
+                                <YAxis type="category" dataKey="name" tick={{ ...AXIS_TICK, fill: '#344054' }} width={130} axisLine={false} tickLine={false} />
+                                <Tooltip content={<ChartTooltip />} isAnimationActive={false} cursor={{ fill: 'var(--bg-tertiary)' }} />
+                                <Bar dataKey="events" name="Events" fill="var(--green)" radius={[0, 4, 4, 0]} />
                             </BarChart>
                         </ResponsiveContainer>
                     )
@@ -276,7 +341,7 @@ export default function AnalyticsPage() {
                 <div className="card">
                     <div className="card-header">
                         <span className="card-title">Security Event Severity</span>
-                        <span style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
+                        <span style={{ fontSize: 12, color: 'var(--text-quaternary)', fontWeight: 600 }}>
                             {severityData.total} classified events
                         </span>
                     </div>
@@ -289,7 +354,7 @@ export default function AnalyticsPage() {
                                 <div key={key}>
                                     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
                                         <span style={{ fontSize: 12, color: meta.color, fontWeight: 600 }}>{desc}</span>
-                                        <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
+                                        <span style={{ fontSize: 12, color: 'var(--text-secondary)', fontWeight: 600 }}>
                                             {count} <span style={{ color: 'var(--text-muted)' }}>({pct}%)</span>
                                         </span>
                                     </div>
@@ -316,16 +381,30 @@ export default function AnalyticsPage() {
                         ? <div className="empty-state">No motion data</div>
                         : (
                             <ResponsiveContainer width="100%" height={200}>
-                                <LineChart data={severityLineData}>
-                                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                                    <XAxis dataKey="date" tick={{ fontSize: 10, fontFamily: 'var(--font-mono)', fill: 'var(--text-muted)' }} />
-                                    <YAxis tick={{ fontSize: 10, fontFamily: 'var(--font-mono)', fill: 'var(--text-muted)' }} allowDecimals={false} />
-                                    <Tooltip {...tooltipStyle} />
-                                    <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11, fontFamily: 'var(--font-mono)' }} />
-                                    <Line type="monotone" dataKey="high"   stroke="#f87171" strokeWidth={2} dot={false} name="High"   />
-                                    <Line type="monotone" dataKey="medium" stroke="#fbbf24" strokeWidth={2} dot={false} name="Medium" />
-                                    <Line type="monotone" dataKey="low"    stroke="#60a5fa" strokeWidth={2} dot={false} name="Low"    />
-                                </LineChart>
+                                <AreaChart data={severityLineData}>
+                                    <defs>
+                                        <linearGradient id="highGradient" x1="0" y1="0" x2="0" y2="1">
+                                            <stop offset="5%" stopColor="#f87171" stopOpacity={0.22} />
+                                            <stop offset="95%" stopColor="#f87171" stopOpacity={0.02} />
+                                        </linearGradient>
+                                        <linearGradient id="mediumGradient" x1="0" y1="0" x2="0" y2="1">
+                                            <stop offset="5%" stopColor="#fbbf24" stopOpacity={0.2} />
+                                            <stop offset="95%" stopColor="#fbbf24" stopOpacity={0.02} />
+                                        </linearGradient>
+                                        <linearGradient id="lowGradient" x1="0" y1="0" x2="0" y2="1">
+                                            <stop offset="5%" stopColor="#60a5fa" stopOpacity={0.2} />
+                                            <stop offset="95%" stopColor="#60a5fa" stopOpacity={0.02} />
+                                        </linearGradient>
+                                    </defs>
+                                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                                    <XAxis dataKey="date" tick={AXIS_TICK} axisLine={false} tickLine={false} />
+                                    <YAxis tick={AXIS_TICK} allowDecimals={false} axisLine={false} tickLine={false} />
+                                    <Tooltip content={<ChartTooltip />} isAnimationActive={false} />
+                                    <Legend iconType="circle" iconSize={8} wrapperStyle={LEGEND_STYLE} />
+                                    <Area type="monotone" dataKey="high" stroke="#f87171" fill="url(#highGradient)" strokeWidth={2} dot={false} name="High" />
+                                    <Area type="monotone" dataKey="medium" stroke="#fbbf24" fill="url(#mediumGradient)" strokeWidth={2} dot={false} name="Medium" />
+                                    <Area type="monotone" dataKey="low" stroke="#60a5fa" fill="url(#lowGradient)" strokeWidth={2} dot={false} name="Low" />
+                                </AreaChart>
                             </ResponsiveContainer>
                         )
                     }

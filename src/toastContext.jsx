@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, useRef } from 'react'
+import { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react'
 import { AlertTriangle, Info, CheckCircle, XCircle, X } from 'lucide-react'
 
 const ToastContext = createContext(null)
@@ -11,10 +11,11 @@ export function useToast() {
 
 // severity -> styling map
 const TOAST_STYLES = {
-  high:   { icon: XCircle,      accent: '#ef4444', bg: 'rgba(239,68,68,0.12)',   border: 'rgba(239,68,68,0.3)'   },
-  medium: { icon: AlertTriangle, accent: '#f59e0b', bg: 'rgba(245,158,11,0.12)', border: 'rgba(245,158,11,0.3)'  },
-  low:    { icon: CheckCircle,  accent: '#10b981', bg: 'rgba(16,185,129,0.12)', border: 'rgba(16,185,129,0.3)'  },
-  info:   { icon: Info,         accent: '#00e5ff', bg: 'rgba(0,229,255,0.10)',  border: 'rgba(0,229,255,0.25)'  },
+  high:    { icon: XCircle,      accent: '#ef4444', bg: 'rgba(239,68,68,0.12)',   border: 'rgba(239,68,68,0.3)'   },
+  medium:  { icon: AlertTriangle, accent: '#f59e0b', bg: 'rgba(245,158,11,0.12)', border: 'rgba(245,158,11,0.3)'  },
+  low:     { icon: CheckCircle,  accent: '#10b981', bg: 'rgba(16,185,129,0.12)', border: 'rgba(16,185,129,0.3)'  },
+  success: { icon: CheckCircle,  accent: '#10b981', bg: 'rgba(16,185,129,0.12)', border: 'rgba(16,185,129,0.3)'  },
+  info:    { icon: Info,         accent: '#3b82f6', bg: 'rgba(59,130,246,0.12)', border: 'rgba(59,130,246,0.3)'  },
 }
 
 let nextId = 0
@@ -23,12 +24,19 @@ export function ToastProvider({ children }) {
   const [toasts, setToasts] = useState([])
   const timers = useRef({})
 
+  // Clear all timers on unmount
+  useEffect(() => {
+    return () => {
+      Object.values(timers.current).forEach(clearTimeout)
+    }
+  }, [])
+
   const dismiss = useCallback((id) => {
+    if (timers.current[id]) { clearTimeout(timers.current[id]); delete timers.current[id]; }
     // mark as leaving so the exit animation plays
     setToasts(prev => prev.map(t => t.id === id ? { ...t, leaving: true } : t))
     setTimeout(() => {
       setToasts(prev => prev.filter(t => t.id !== id))
-      delete timers.current[id]
     }, 350) // matches CSS transition duration
   }, [])
 
@@ -44,7 +52,7 @@ export function ToastProvider({ children }) {
     <ToastContext.Provider value={{ addToast }}>
       {children}
       {/* Toast stack — bottom right */}
-      <div style={{
+      <div className="toast-container" aria-live="polite" style={{
         position: 'fixed',
         bottom: 24,
         right: 24,
@@ -74,13 +82,13 @@ function Toast({ toast, onDismiss }) {
         alignItems: 'flex-start',
         gap: 12,
         padding: '13px 16px',
-        background: '#0d1117',
+        background: 'var(--bg-primary, #ffffff)',
         border: `1px solid ${style.border}`,
         borderLeft: `3px solid ${style.accent}`,
         borderRadius: 10,
         minWidth: 280,
         maxWidth: 360,
-        boxShadow: `0 8px 32px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.04), inset 0 1px 0 rgba(255,255,255,0.05)`,
+        boxShadow: 'var(--shadow-lg)',
         backdropFilter: 'blur(12px)',
         animation: toast.leaving ? 'toastOut 0.35s ease forwards' : 'toastIn 0.3s ease',
         position: 'relative',
@@ -106,7 +114,7 @@ function Toast({ toast, onDismiss }) {
           fontFamily: 'var(--font-display)',
           fontWeight: 700,
           fontSize: 13,
-          color: '#e8edf2',
+          color: 'var(--text-primary)',
           lineHeight: 1.3,
         }}>
           {toast.title}
@@ -115,7 +123,7 @@ function Toast({ toast, onDismiss }) {
           <div style={{
             fontFamily: 'var(--font-mono)',
             fontSize: 11,
-            color: '#7a8899',
+            color: 'var(--text-secondary)',
             marginTop: 3,
             lineHeight: 1.4,
             overflow: 'hidden',
@@ -145,11 +153,12 @@ function Toast({ toast, onDismiss }) {
       {/* Dismiss */}
       <button
         onClick={() => onDismiss(toast.id)}
+        aria-label="Close toast"
         style={{
           background: 'none',
           border: 'none',
           cursor: 'pointer',
-          color: '#3d4f62',
+          color: 'var(--text-quaternary)',
           padding: 2,
           flexShrink: 0,
           position: 'relative',
@@ -157,8 +166,8 @@ function Toast({ toast, onDismiss }) {
           lineHeight: 1,
           transition: 'color 0.15s',
         }}
-        onMouseEnter={e => e.currentTarget.style.color = '#e8edf2'}
-        onMouseLeave={e => e.currentTarget.style.color = '#3d4f62'}
+        onMouseEnter={e => e.currentTarget.style.color = 'var(--text-primary)'}
+        onMouseLeave={e => e.currentTarget.style.color = 'var(--text-quaternary)'}
       >
         <X size={14} />
       </button>
